@@ -1,13 +1,24 @@
 import 'package:markdown/markdown.dart' as md;
 
+String markdownToHtmlFragment(
+  String markdownSource, {
+  md.ExtensionSet? extensionSet,
+}) {
+  return md.markdownToHtml(
+    markdownSource,
+    extensionSet: extensionSet ?? md.ExtensionSet.gitHubFlavored,
+  );
+}
+
 String exportSelfContainedHtml({
   required String title,
   required String markdownSource,
   required bool dark,
+  md.ExtensionSet? extensionSet,
 }) {
-  final body = md.markdownToHtml(
+  final body = markdownToHtmlFragment(
     markdownSource,
-    extensionSet: md.ExtensionSet.gitHubFlavored,
+    extensionSet: extensionSet,
   );
   final bg = dark ? '#1e1e1e' : '#ffffff';
   final fg = dark ? '#e6e6e6' : '#1a1a1a';

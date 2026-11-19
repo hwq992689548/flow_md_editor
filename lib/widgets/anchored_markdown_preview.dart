@@ -30,6 +30,7 @@ class AnchoredMarkdownPreview extends StatelessWidget {
     this.documentPath,
     this.imageBuilder,
     this.onSelectionChanged,
+    this.extensionSet,
   });
 
   final String source;
@@ -37,6 +38,7 @@ class AnchoredMarkdownPreview extends StatelessWidget {
   final String? documentPath;
   final Widget Function(Uri uri, String? title, String? alt)? imageBuilder;
   final ValueChanged<String?>? onSelectionChanged;
+  final md.ExtensionSet? extensionSet;
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +66,8 @@ class AnchoredMarkdownPreview extends StatelessWidget {
                 data: defs.isEmpty ? blocks[i] : '${blocks[i]}\n\n$defs',
                 styleSheet: previewStyle(context),
                 selectable: false,
-                extensionSet: md.ExtensionSet.gitHubFlavored,
+                extensionSet:
+                    extensionSet ?? md.ExtensionSet.gitHubFlavored,
                 onTapLink: (text, href, title) async {
                   if (href == null) return;
                   final uri = Uri.tryParse(href);

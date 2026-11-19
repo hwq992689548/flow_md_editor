@@ -34,12 +34,9 @@ void main() {
     expect(find.text('Editor'), findsOneWidget);
     expect(find.text('Live'), findsNothing);
     expect(find.text('本地 Markdown 预览'), findsNothing);
-    expect(find.text('Markdown'), findsNothing);
-    // Theme + font size live directly in the top toolbar (no secondary sheet).
-    expect(find.byTooltip('浅色'), findsOneWidget);
-    expect(find.byTooltip('深色'), findsOneWidget);
-    expect(find.byTooltip('随系统'), findsOneWidget);
-    expect(find.byTooltip('增大字号'), findsOneWidget);
+    expect(find.byTooltip('主题'), findsOneWidget);
+    expect(find.byTooltip('查找 (⌘F / Ctrl+F)'), findsOneWidget);
+    expect(find.byTooltip('文档设置'), findsOneWidget);
     // Default themeMode is system; widget tests use light platform brightness.
     expect(
       Theme.of(tester.element(find.byType(Scaffold))).brightness,
@@ -123,12 +120,10 @@ void main() {
   ) async {
     await launch(tester);
     await mode(tester, 'Split');
-    expect(
-      find.text('Split · 左侧源码 | 右侧预览（点「定位」同步）'),
-      findsOneWidget,
-    );
+    expect(find.text('自动刷新预览'), findsOneWidget);
     expect(find.text('定位'), findsOneWidget);
     expect(find.byTooltip('定位到编辑位置'), findsOneWidget);
+    expect(find.byTooltip('查找 (⌘F / Ctrl+F)'), findsOneWidget);
     // Left source TextField + right rendered welcome heading.
     expect(find.byType(TextField), findsWidgets);
     expect(find.text('Flow MD Editor'), findsWidgets);
@@ -180,10 +175,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Next'));
     await tester.pumpAndSettle();
-    expect(
-      find.text('Split · 左侧源码 | 右侧预览（点「定位」同步）'),
-      findsOneWidget,
-    );
+    expect(find.text('定位'), findsOneWidget);
     final sourceField = find.byType(TextField).last;
     final controller = tester.widget<TextField>(sourceField).controller!;
     expect(controller.selection.isValid, isTrue);
@@ -282,20 +274,22 @@ void main() {
 
   testWidgets('toolbar theme and font size controls', (tester) async {
     await launch(tester);
-    expect(find.byTooltip('浅色'), findsOneWidget);
-    expect(find.byTooltip('深色'), findsOneWidget);
-    expect(find.byTooltip('随系统'), findsOneWidget);
-    expect(find.byTooltip('增大字号'), findsOneWidget);
+    expect(find.byTooltip('主题'), findsOneWidget);
+    expect(find.byTooltip('文档设置'), findsOneWidget);
     expect(find.text('外观'), findsNothing);
 
-    await tester.tap(find.byTooltip('深色'));
+    await tester.tap(find.byTooltip('主题'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('深色').last);
     await tester.pumpAndSettle();
     expect(
       Theme.of(tester.element(find.byType(Scaffold))).brightness,
       Brightness.dark,
     );
 
-    await tester.tap(find.byTooltip('浅色'));
+    await tester.tap(find.byTooltip('主题'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('浅色').last);
     await tester.pumpAndSettle();
     expect(
       Theme.of(tester.element(find.byType(Scaffold))).brightness,
@@ -329,7 +323,7 @@ void main() {
     );
     final field = find.byType(TextField).last;
     expect(tester.widget<TextField>(field).style!.fontSize, 18);
-    expect(find.byTooltip('深色'), findsOneWidget);
+    expect(find.text('深色'), findsWidgets);
     expect(find.text('18'), findsWidgets);
     expect(tester.takeException(), isNull);
   });
@@ -417,6 +411,47 @@ void main() {
       style.decoration == null || style.decoration == TextDecoration.none,
       isTrue,
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('H2 toolbar prefix applies to the current source line', (
+    tester,
+  ) async {
+    await launch(tester);
+    await mode(tester, 'Editor');
+    final field = find.byType(TextField).last;
+    await tester.enterText(field, 'plain heading');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('heading-h2')));
+    await tester.pumpAndSettle();
+    final controller = tester.widget<TextField>(field).controller!;
+    expect(controller.text, startsWith('## '));
+    expect(controller.text, contains('plain heading'));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('auto reload off waits for refresh; locate stays available', (
+    tester,
+  ) async {
+    await launch(tester);
+    await mode(tester, 'Split');
+    expect(find.text('定位'), findsOneWidget);
+    expect(find.byTooltip('查找 (⌘F / Ctrl+F)'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('auto-reload-preview')));
+    await tester.pumpAndSettle();
+
+    final field = find.byType(TextField).last;
+    await tester.enterText(field, '# Hello Manual\n\nBody text.');
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Flow MD Editor'), findsWidgets);
+
+    await tester.tap(find.byTooltip('刷新预览'));
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.pumpAndSettle();
+    expect(find.text('Hello Manual'), findsWidgets);
+    expect(find.text('定位'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

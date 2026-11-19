@@ -1,6 +1,5 @@
 import "dart:async";
 import "dart:io";
-import "dart:ui" show BoxHeightStyle, BoxWidthStyle;
 
 import "package:file_picker/file_picker.dart";
 import "package:flutter/material.dart";
@@ -16,12 +15,14 @@ import "package:shared_preferences/shared_preferences.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "../models/editor_mode.dart";
+import "../models/markdown_flavor.dart";
 import "../models/open_document.dart";
 import "../services/app_settings.dart";
 import "../services/document_service.dart";
 import "../services/html_export.dart";
 import "../utils/block_splitter.dart";
 import "../utils/document_outline.dart";
+import "../utils/heading_toggle.dart";
 import "../utils/text_finder.dart";
 import "../widgets/preview_style.dart";
 import "../widgets/preview_text.dart";
@@ -29,6 +30,7 @@ import "../widgets/heading_anchor.dart";
 import "../widgets/find_bar.dart";
 import "../widgets/outline_sidebar.dart";
 import "../widgets/anchored_markdown_preview.dart";
+import "../widgets/source_editor.dart";
 
 class EditorHome extends StatefulWidget {
   const EditorHome({super.key, required this.settings});
@@ -44,9 +46,11 @@ class _EditorHomeState extends State<EditorHome> {
   static const _wrapKey = "soft_wrap";
   static const _openPathsKey = "open_doc_paths";
   static const _activePathKey = "active_doc_path";
+  static const _flavorKey = "markdown_flavor";
+  static const _autoReloadKey = "auto_reload_preview";
 
   final _fileIO = DocumentService();
-  final _controller = TextEditingController();
+  final _controller = HighlightingTextController();
   final _focusNode = FocusNode();
 
   final List<OpenDocument> _openDocs = [];
@@ -72,6 +76,9 @@ class _EditorHomeState extends State<EditorHome> {
   String _previewSource = "";
   Timer? _previewDebounce;
   int? _lastEnsuredBlockStart;
+  MarkdownFlavor _flavor = MarkdownFlavor.gfm;
+  bool _autoReloadPreview = true;
+  bool _previewHtmlTab = false;
 
   String? get _path =>
       _openDocs.isEmpty ? null : _openDocs[_activeIndex].path;
@@ -94,6 +101,8 @@ class _EditorHomeState extends State<EditorHome> {
     _mode = EditorMode.fromName(widget.prefs.getString(_modeKey));
     _wrap = widget.prefs.getBool(_wrapKey) ?? true;
     _bodyWidth = widget.prefs.getDouble(_widthKey) ?? 780;
+    _flavor = MarkdownFlavor.fromName(widget.prefs.getString(_flavorKey));
+    _autoReloadPreview = widget.prefs.getBool(_autoReloadKey) ?? true;
     _bootstrapDocuments();
     _controller.addListener(_onTextChanged);
   }
@@ -219,12 +228,18 @@ class _EditorHomeState extends State<EditorHome> {
   }
 
   void _schedulePreviewUpdate() {
+    if (!_autoReloadPreview) return;
     _previewDebounce?.cancel();
     _previewDebounce = Timer(const Duration(milliseconds: 100), () {
       if (!mounted) return;
       if (_previewSource == _controller.text) return;
       setState(() => _previewSource = _controller.text);
     });
+  }
+
+  void _reloadPreview() {
+    _previewDebounce?.cancel();
+    setState(() => _previewSource = _controller.text);
   }
 
   /// Manual Split sync: scroll the right preview to the block for [charOffset].
@@ -477,6 +492,7 @@ class _EditorHomeState extends State<EditorHome> {
       title: _path != null ? p.basename(_path!) : "untitled",
       markdownSource: _controller.text,
       dark: dark,
+      extensionSet: _flavor.extensionSet,
     );
     final out = await FilePicker.platform.saveFile(
       dialogTitle: "导出 HTML",
@@ -565,6 +581,23 @@ class _EditorHomeState extends State<EditorHome> {
       );
     }
     _refreshMatches();
+  }
+
+  void _applyHeading(int level) {
+    final sel = _controller.selection;
+    final offset = sel.isValid
+        ? sel.extentOffset.clamp(0, _controller.text.length)
+        : 0;
+    final edit = toggleHeadingLine(
+      text: _controller.text,
+      offset: offset,
+      level: level,
+    );
+    _controller.value = TextEditingValue(
+      text: edit.text,
+      selection: TextSelection.collapsed(offset: edit.caret),
+    );
+    _focusNode.requestFocus();
   }
 
   void _wrapSelection(String left, String right) {
@@ -755,6 +788,71 @@ class _EditorHomeState extends State<EditorHome> {
     );
   }
 
+  Widget _dropdownChip<T>({
+    required T value,
+    required List<T> values,
+    required String Function(T) labelOf,
+    required ValueChanged<T> onSelected,
+    required String tooltip,
+    String Function(T)? chipLabelOf,
+  }) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final fg = dark ? const Color(0xFFD1D1D6) : const Color(0xFF3A3A3C);
+    final chipBg = dark ? const Color(0xFF1C1C1E) : const Color(0xFFE8E8ED);
+    final chipSide = dark ? const Color(0xFF48484A) : const Color(0xFFD2D2D7);
+    return PopupMenuButton<T>(
+      tooltip: tooltip,
+      initialValue: value,
+      onSelected: onSelected,
+      itemBuilder: (ctx) => [
+        for (final v in values)
+          PopupMenuItem<T>(value: v, child: Text(labelOf(v))),
+      ],
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+        decoration: BoxDecoration(
+          color: chipBg,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: chipSide),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              (chipLabelOf ?? labelOf)(value),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: fg),
+            ),
+            Icon(Icons.arrow_drop_down, size: 18, color: fg),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _headingBtn(int level, Color fg) {
+    return Tooltip(
+      message: 'H$level',
+      child: InkWell(
+        onTap: () => _applyHeading(level),
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Text(
+            'H$level',
+            key: ValueKey('heading-h$level'),
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: fg,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _topBar() {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final barBg = dark ? const Color(0xFF2C2C2E) : const Color(0xFFF5F5F7);
@@ -767,317 +865,262 @@ class _EditorHomeState extends State<EditorHome> {
     final themeMode = widget.settings.themeMode.value;
     final fontSize = widget.settings.fontSize.value;
 
-    ButtonStyle segStyle({
-      double h = -3,
-      double v = -2,
-      double font = 11,
-      EdgeInsetsGeometry? padding,
-    }) {
-      return SegmentedButton.styleFrom(
-        visualDensity: VisualDensity(horizontal: h, vertical: v),
-        backgroundColor: segBg,
-        selectedBackgroundColor: segSelected,
-        selectedForegroundColor:
-            dark ? Colors.white : const Color(0xFF1C1C1E),
-        foregroundColor: segFg,
-        textStyle: TextStyle(fontSize: font, fontWeight: FontWeight.w500),
-        side: BorderSide(color: segSide),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        padding: padding ?? const EdgeInsets.symmetric(horizontal: 6),
+    final segStyle = SegmentedButton.styleFrom(
+      visualDensity: const VisualDensity(horizontal: -2, vertical: -1),
+      backgroundColor: segBg,
+      selectedBackgroundColor: segSelected,
+      selectedForegroundColor: dark ? Colors.white : const Color(0xFF1C1C1E),
+      foregroundColor: segFg,
+      textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+      side: BorderSide(color: segSide),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+    );
+
+    Widget leftFit(Widget child) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: child,
+        ),
       );
     }
 
     return Container(
-      height: 44,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: BoxDecoration(
         color: barBg,
         border: Border(bottom: BorderSide(color: barBorder)),
       ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          // Keep Chinese labels when there's room; icon-only under ~1100px
-          // so the right cluster does not crowd the centered mode control.
-          final showThemeLabels = constraints.maxWidth >= 1100;
-          return Row(
-            children: [
-              Expanded(
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    _title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: titleColor,
-                      backgroundColor: Colors.transparent,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            height: 48,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      _title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: titleColor,
+                      ),
                     ),
                   ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: SegmentedButton<EditorMode>(
-                  showSelectedIcon: false,
-                  style: segStyle(h: -3, v: -2, font: 12),
-                  segments: const [
-                    ButtonSegment(
-                      value: EditorMode.live,
-                      label: Text('Split'),
-                      tooltip: '左右分栏：源码 | 预览',
-                    ),
-                    ButtonSegment(
-                      value: EditorMode.source,
-                      label: Text('Editor'),
-                    ),
-                    ButtonSegment(
-                      value: EditorMode.read,
-                      label: Text('Preview'),
-                    ),
-                  ],
-                  selected: {_mode},
-                  onSelectionChanged: (s) => _setMode(s.first),
-                ),
-              ),
-              Expanded(
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.centerRight,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SegmentedButton<ThemeMode>(
-                          showSelectedIcon: false,
-                          style: segStyle(
-                            h: -4,
-                            v: -2,
-                            font: 11,
-                            padding: EdgeInsets.symmetric(
-                              horizontal: showThemeLabels ? 6 : 4,
-                            ),
+                  const SizedBox(width: 12),
+                  Flexible(
+                    flex: 2,
+                    child: leftFit(
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _dropdownChip<MarkdownFlavor>(
+                            value: _flavor,
+                            values: MarkdownFlavor.values,
+                            labelOf: (f) => f.label,
+                            chipLabelOf: (f) => f.shortLabel,
+                            tooltip: 'Markdown 方言',
+                            onSelected: (f) async {
+                              setState(() => _flavor = f);
+                              await widget.prefs.setString(_flavorKey, f.name);
+                            },
                           ),
-                          segments: [
-                            ButtonSegment(
-                              value: ThemeMode.light,
-                              label: showThemeLabels ? const Text('浅色') : null,
-                              icon: showThemeLabels
-                                  ? null
-                                  : const Icon(
-                                      Icons.light_mode_outlined,
-                                      size: 15,
-                                    ),
-                              tooltip: '浅色',
-                            ),
-                            ButtonSegment(
-                              value: ThemeMode.dark,
-                              label: showThemeLabels ? const Text('深色') : null,
-                              icon: showThemeLabels
-                                  ? null
-                                  : const Icon(
-                                      Icons.dark_mode_outlined,
-                                      size: 15,
-                                    ),
-                              tooltip: '深色',
-                            ),
-                            ButtonSegment(
-                              value: ThemeMode.system,
-                              label: showThemeLabels ? const Text('随系统') : null,
-                              icon: showThemeLabels
-                                  ? null
-                                  : const Icon(
-                                      Icons.contrast_outlined,
-                                      size: 15,
-                                    ),
-                              tooltip: '随系统',
-                            ),
-                          ],
-                          selected: {themeMode},
-                          onSelectionChanged: (s) =>
-                              widget.settings.setThemeMode(s.first),
-                        ),
-                        _vSep(segSide),
-                        Container(
-                          height: 28,
-                          decoration: BoxDecoration(
-                            color: segBg,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: segSide),
+                          const SizedBox(width: 10),
+                          _dropdownChip<ThemeMode>(
+                            value: themeMode,
+                            values: ThemeMode.values,
+                            labelOf: AppSettings.themeModeLabel,
+                            tooltip: '主题',
+                            onSelected: widget.settings.setThemeMode,
                           ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                tooltip: '减小字号',
-                                onPressed: fontSize <= AppSettings.minFontSize
-                                    ? null
-                                    : () => widget.settings.bumpFontSize(-1),
-                                icon: Icon(Icons.remove, size: 15, color: segFg),
-                                visualDensity: VisualDensity.compact,
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(
-                                  minWidth: 26,
-                                  minHeight: 28,
-                                ),
+                          const SizedBox(width: 16),
+                          SegmentedButton<EditorMode>(
+                            showSelectedIcon: false,
+                            style: segStyle,
+                            segments: const [
+                              ButtonSegment(
+                                value: EditorMode.live,
+                                label: Text('Split'),
+                                tooltip: '左右分栏：源码 | 预览',
                               ),
-                              SizedBox(
-                                width: 26,
-                                child: Text(
-                                  '${fontSize.round()}',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: dark
-                                        ? Colors.white
-                                        : const Color(0xFF1C1C1E),
-                                  ),
-                                ),
+                              ButtonSegment(
+                                value: EditorMode.source,
+                                label: Text('Editor'),
                               ),
-                              IconButton(
-                                tooltip: '增大字号',
-                                onPressed: fontSize >= AppSettings.maxFontSize
-                                    ? null
-                                    : () => widget.settings.bumpFontSize(1),
-                                icon: Icon(Icons.add, size: 15, color: segFg),
-                                visualDensity: VisualDensity.compact,
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(
-                                  minWidth: 26,
-                                  minHeight: 28,
-                                ),
+                              ButtonSegment(
+                                value: EditorMode.read,
+                                label: Text('Preview'),
                               ),
                             ],
+                            selected: {_mode},
+                            onSelectionChanged: (s) => _setMode(s.first),
                           ),
-                        ),
-                        _vSep(segSide),
-                        IconButton(
-                          tooltip: '查找 (⌘F / Ctrl+F)',
-                          onPressed: () => setState(() => _findVisible = true),
-                          icon: const Icon(Icons.search, size: 18),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                        PopupMenuButton<String>(
-                          tooltip: "文档设置",
-                          icon: const Icon(Icons.tune, size: 18),
-                          onSelected: (v) async {
-                            switch (v) {
-                              case "new":
-                                await _newDoc();
-                              case "open":
-                                await _openDoc();
-                              case "save":
-                                await _saveDoc();
-                              case "saveAs":
-                                await _saveDoc(saveAs: true);
-                              case "reload":
-                                await _reloadFromDisk();
-                              case "export":
-                                await _exportHtml();
-                              case "wrap":
-                                setState(() => _wrap = !_wrap);
-                                await widget.prefs.setBool(_wrapKey, _wrap);
-                              case "width":
-                                await _editWidth();
-                            }
-                          },
-                          itemBuilder: (ctx) => const [
-                            PopupMenuItem(value: "new", child: Text("新建")),
-                            PopupMenuItem(value: "open", child: Text("打开…")),
-                            PopupMenuItem(value: "save", child: Text("保存")),
-                            PopupMenuItem(value: "saveAs", child: Text("另存为…")),
-                            PopupMenuItem(
-                              value: "reload",
-                              child: Text("从磁盘重新载入"),
-                            ),
-                            PopupMenuDivider(),
-                            PopupMenuItem(
-                              value: "export",
-                              child: Text("导出 HTML"),
-                            ),
-                            PopupMenuItem(
-                              value: "wrap",
-                              child: Text("切换自动换行"),
-                            ),
-                            PopupMenuItem(
-                              value: "width",
-                              child: Text("正文宽度…"),
-                            ),
-                          ],
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
-                ),
+                ],
               ),
-            ],
-          );
-        },
+            ),
+          ),
+          Divider(height: 1, thickness: 1, color: barBorder),
+          SizedBox(
+            height: 40,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: leftFit(
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: '查找 (⌘F / Ctrl+F)',
+                            onPressed: () =>
+                                setState(() => _findVisible = true),
+                            icon: const Icon(Icons.search, size: 20),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          _vSep(segSide),
+                          for (var i = 1; i <= 6; i++)
+                            _headingBtn(i, titleColor),
+                          _vSep(segSide),
+                          Container(
+                            height: 30,
+                            decoration: BoxDecoration(
+                              color: segBg,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: segSide),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  tooltip: '减小字号',
+                                  onPressed:
+                                      fontSize <= AppSettings.minFontSize
+                                      ? null
+                                      : () =>
+                                            widget.settings.bumpFontSize(-1),
+                                  icon: Icon(
+                                    Icons.remove,
+                                    size: 16,
+                                    color: segFg,
+                                  ),
+                                  visualDensity: VisualDensity.compact,
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(
+                                    minWidth: 30,
+                                    minHeight: 30,
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: 28,
+                                  child: Text(
+                                    '${fontSize.round()}',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: titleColor,
+                                    ),
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: '增大字号',
+                                  onPressed:
+                                      fontSize >= AppSettings.maxFontSize
+                                      ? null
+                                      : () =>
+                                            widget.settings.bumpFontSize(1),
+                                  icon: Icon(
+                                    Icons.add,
+                                    size: 16,
+                                    color: segFg,
+                                  ),
+                                  visualDensity: VisualDensity.compact,
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(
+                                    minWidth: 30,
+                                    minHeight: 30,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  PopupMenuButton<String>(
+                    tooltip: "文档设置",
+                    icon: const Icon(Icons.tune, size: 20),
+                    onSelected: (v) async {
+                      switch (v) {
+                        case "new":
+                          await _newDoc();
+                        case "open":
+                          await _openDoc();
+                        case "save":
+                          await _saveDoc();
+                        case "saveAs":
+                          await _saveDoc(saveAs: true);
+                        case "reload":
+                          await _reloadFromDisk();
+                        case "export":
+                          await _exportHtml();
+                        case "wrap":
+                          setState(() => _wrap = !_wrap);
+                          await widget.prefs.setBool(_wrapKey, _wrap);
+                        case "width":
+                          await _editWidth();
+                      }
+                    },
+                    itemBuilder: (ctx) => const [
+                      PopupMenuItem(value: "new", child: Text("新建")),
+                      PopupMenuItem(value: "open", child: Text("打开…")),
+                      PopupMenuItem(value: "save", child: Text("保存")),
+                      PopupMenuItem(value: "saveAs", child: Text("另存为…")),
+                      PopupMenuItem(
+                        value: "reload",
+                        child: Text("从磁盘重新载入"),
+                      ),
+                      PopupMenuDivider(),
+                      PopupMenuItem(
+                        value: "export",
+                        child: Text("导出 HTML"),
+                      ),
+                      PopupMenuItem(
+                        value: "wrap",
+                        child: Text("切换自动换行"),
+                      ),
+                      PopupMenuItem(
+                        value: "width",
+                        child: Text("正文宽度…"),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
   Widget _documentPane() {
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    final paneBg = dark ? const Color(0xFF1C1C1E) : Colors.white;
-    final paneBorder = dark ? const Color(0xFF3A3A3C) : const Color(0xFFD2D2D7);
-    final muted = dark ? const Color(0xFF8E8E93) : const Color(0xFF6C6C70);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: _mode == EditorMode.live
-                ? double.infinity
-                : _bodyWidth + 48,
-          ),
-          child: Container(
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              color: paneBg,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: paneBorder),
-            ),
-            child: Column(
-              children: [
-                SizedBox(
-                  height: 32,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: Row(
-                      children: [
-                        Icon(
-                          _mode == EditorMode.source
-                              ? Icons.code
-                              : Icons.visibility_outlined,
-                          size: 14,
-                          color: muted,
-                        ),
-                        const SizedBox(width: 8),
-                        Flexible(
-                          child: Text(
-                            _mode == EditorMode.live
-                                ? 'Split · 左侧源码 | 右侧预览（点「定位」同步）'
-                                : _mode == EditorMode.source
-                                ? 'Editor'
-                                : 'Preview',
-                            style: TextStyle(fontSize: 11, color: muted),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                Divider(height: 1, thickness: 0.5, color: paneBorder),
-                Expanded(child: _buildBody()),
-              ],
-            ),
-          ),
-        ),
-      ),
+    return ColoredBox(
+      color: Theme.of(context).scaffoldBackgroundColor,
+      child: _buildBody(),
     );
   }
 
@@ -1156,7 +1199,7 @@ class _EditorHomeState extends State<EditorHome> {
   Widget _buildBody() {
     switch (_mode) {
       case EditorMode.source:
-        return _centered(_sourceEditor(scrollController: _sourceScroll));
+        return _sourceEditor(scrollController: _sourceScroll);
       case EditorMode.read:
         return SingleChildScrollView(
           controller: _previewScroll,
@@ -1173,6 +1216,11 @@ class _EditorHomeState extends State<EditorHome> {
   }
 
   Widget _splitView() {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final muted = dark ? const Color(0xFF9399A8) : const Color(0xFF6C6C70);
+    final barBg = dark ? const Color(0xFF222426) : const Color(0xFFF3F3F5);
+    final barBorder = dark ? const Color(0xFF3A3A3C) : const Color(0xFFD2D2D7);
+    final paneBg = dark ? const Color(0xFF1C1C1E) : Colors.white;
     return LayoutBuilder(
       builder: (context, constraints) {
         final total = constraints.maxWidth;
@@ -1183,17 +1231,7 @@ class _EditorHomeState extends State<EditorHome> {
           children: [
             SizedBox(
               width: left,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  border: Border(
-                    right: BorderSide(
-                      color: Theme.of(context).dividerColor,
-                      width: 0,
-                    ),
-                  ),
-                ),
-                child: _sourceEditor(scrollController: _sourceScroll),
-              ),
+              child: _sourceEditor(scrollController: _sourceScroll),
             ),
             MouseRegion(
               cursor: SystemMouseCursors.resizeColumn,
@@ -1213,68 +1251,181 @@ class _EditorHomeState extends State<EditorHome> {
               ),
             ),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  SizedBox(
-                    height: 36,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Row(
-                        children: [
-                          Text(
-                            '预览',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Theme.of(context).brightness ==
-                                      Brightness.dark
-                                  ? const Color(0xFF9399A8)
-                                  : const Color(0xFF6C6C70),
-                            ),
+              child: ColoredBox(
+                color: paneBg,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    SizedBox(
+                      height: 42,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: barBg,
+                          border: Border(
+                            bottom: BorderSide(color: barBorder),
                           ),
-                          const Spacer(),
-                          Tooltip(
-                            message: '定位到编辑位置',
-                            child: TextButton.icon(
-                              onPressed: _locatePreviewToCaret,
-                              icon: const Icon(Icons.my_location, size: 15),
-                              label: const Text(
-                                '定位',
-                                style: TextStyle(fontSize: 12),
-                              ),
-                              style: TextButton.styleFrom(
-                                visualDensity: VisualDensity.compact,
-                                foregroundColor:
-                                    Theme.of(context).brightness ==
-                                            Brightness.dark
-                                        ? const Color(0xFFA8ADB9)
-                                        : const Color(0xFF6C6C70),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: Alignment.centerLeft,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                    Checkbox(
+                                      key: const ValueKey(
+                                        'auto-reload-preview',
+                                      ),
+                                      value: _autoReloadPreview,
+                                      materialTapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                      visualDensity: VisualDensity.compact,
+                                      onChanged: (v) async {
+                                        final next = v ?? true;
+                                        setState(
+                                          () => _autoReloadPreview = next,
+                                        );
+                                        await widget.prefs.setBool(
+                                          _autoReloadKey,
+                                          next,
+                                        );
+                                        if (next) _reloadPreview();
+                                      },
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '自动刷新预览',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: muted,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 16),
+                                    SegmentedButton<bool>(
+                                      showSelectedIcon: false,
+                                      style: SegmentedButton.styleFrom(
+                                        visualDensity: const VisualDensity(
+                                          horizontal: -2,
+                                          vertical: -2,
+                                        ),
+                                        textStyle: const TextStyle(
+                                          fontSize: 12,
+                                        ),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                        ),
+                                      ),
+                                      segments: const [
+                                        ButtonSegment(
+                                          value: false,
+                                          label: Text('Preview'),
+                                        ),
+                                        ButtonSegment(
+                                          value: true,
+                                          label: Text('HTML'),
+                                        ),
+                                      ],
+                                      selected: {_previewHtmlTab},
+                                      onSelectionChanged: (s) {
+                                        setState(
+                                          () => _previewHtmlTab = s.first,
+                                        );
+                                      },
+                                    ),
+                                    const SizedBox(width: 16),
+                                    ConstrainedBox(
+                                      constraints: const BoxConstraints(
+                                        maxWidth: 200,
+                                      ),
+                                      child: Text(
+                                        _title,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: muted,
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      tooltip: '刷新预览',
+                                      onPressed: _reloadPreview,
+                                      icon: const Icon(Icons.refresh, size: 18),
+                                      visualDensity: VisualDensity.compact,
+                                    ),
+                                    ],
+                                  ),
                                 ),
-                                minimumSize: const Size(0, 28),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              const SizedBox(width: 12),
+                              Tooltip(
+                                message: '定位到编辑位置',
+                                child: TextButton.icon(
+                                  onPressed: () {
+                                    if (_previewHtmlTab) {
+                                      setState(() => _previewHtmlTab = false);
+                                    }
+                                    _locatePreviewToCaret();
+                                  },
+                                  icon: const Icon(Icons.my_location, size: 16),
+                                  label: const Text(
+                                    '定位',
+                                    style: TextStyle(fontSize: 13),
+                                  ),
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: muted,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                    ),
+                                    minimumSize: const Size(0, 32),
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: _previewHtmlTab
+                          ? SingleChildScrollView(
+                              controller: _previewScroll,
+                              padding: const EdgeInsets.fromLTRB(16, 12, 16, 48),
+                              child: SelectableText(
+                                markdownToHtmlFragment(
+                                  _previewSource,
+                                  extensionSet: _flavor.extensionSet,
+                                ),
+                                style: TextStyle(
+                                  fontFamily: 'Menlo',
+                                  fontSize: 12.5,
+                                  height: 1.45,
+                                  color: dark
+                                      ? const Color(0xFFD7DAE0)
+                                      : const Color(0xFF1F2328),
+                                ),
+                              ),
+                            )
+                          : SingleChildScrollView(
+                              controller: _previewScroll,
+                              padding: const EdgeInsets.fromLTRB(20, 8, 20, 60),
+                              child: AnchoredMarkdownPreview(
+                                source: _previewSource,
+                                blockKeys: _blockKeys,
+                                documentPath: _path,
+                                imageBuilder: _previewImage,
+                                extensionSet: _flavor.extensionSet,
                               ),
                             ),
-                          ),
-                        ],
-                      ),
                     ),
-                  ),
-                  const Divider(height: 1, thickness: 0.5),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      controller: _previewScroll,
-                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 60),
-                      child: AnchoredMarkdownPreview(
-                        source: _previewSource,
-                        blockKeys: _blockKeys,
-                        documentPath: _path,
-                        imageBuilder: _previewImage,
-                      ),
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ],
@@ -1283,32 +1434,18 @@ class _EditorHomeState extends State<EditorHome> {
     );
   }
 
-  Widget _centered(Widget child) {
-    return Align(
-      alignment: Alignment.topCenter,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: _bodyWidth),
-        child: child,
-      ),
-    );
-  }
-
   Widget _sourceEditor({ScrollController? scrollController}) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: TextField(
-        controller: _controller,
-        focusNode: _focusNode,
-        scrollController: scrollController,
-        maxLines: null,
-        expands: true,
-        keyboardType: TextInputType.multiline,
-        style: TextStyle(fontFamily: "Menlo", fontSize: _fontSize, height: 1.5),
-        selectionHeightStyle: BoxHeightStyle.includeLineSpacingMiddle,
-        selectionWidthStyle: BoxWidthStyle.tight,
-        decoration: const InputDecoration.collapsed(hintText: "开始书写 Markdown…"),
-        onTap: _syncActiveBlockFromSelection,
-      ),
+    return SourceEditor(
+      controller: _controller,
+      focusNode: _focusNode,
+      scrollController: scrollController ?? _sourceScroll,
+      fontSize: _fontSize,
+      fileName: _openDocs.isEmpty
+          ? 'Untitled'
+          : (_openDocs[_activeIndex].path == null
+                ? 'Untitled'
+                : _openDocs[_activeIndex].fileName),
+      onTap: _syncActiveBlockFromSelection,
     );
   }
 
@@ -1330,7 +1467,7 @@ class _EditorHomeState extends State<EditorHome> {
       data: source,
       styleSheet: previewStyle(context),
       selectable: false,
-      extensionSet: md.ExtensionSet.gitHubFlavored,
+      extensionSet: _flavor.extensionSet,
       onTapLink: (text, href, title) async {
         if (href == null) return;
         final uri = Uri.tryParse(href);
