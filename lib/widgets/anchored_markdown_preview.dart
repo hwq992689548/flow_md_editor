@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -13,6 +14,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../utils/block_splitter.dart';
 import '../utils/document_outline.dart';
 import '../utils/link_reference_defs.dart';
+import 'preview_find_overlay.dart';
 import 'preview_style.dart';
 import 'preview_text.dart';
 
@@ -31,6 +33,10 @@ class AnchoredMarkdownPreview extends StatelessWidget {
     this.imageBuilder,
     this.onSelectionChanged,
     this.extensionSet,
+    this.highlightedBlockStart,
+    this.maxWidth,
+    this.fontSize,
+    this.findHighlight,
   });
 
   final String source;
@@ -39,6 +45,10 @@ class AnchoredMarkdownPreview extends StatelessWidget {
   final Widget Function(Uri uri, String? title, String? alt)? imageBuilder;
   final ValueChanged<String?>? onSelectionChanged;
   final md.ExtensionSet? extensionSet;
+  final int? highlightedBlockStart;
+  final double? maxWidth;
+  final double? fontSize;
+  final PreviewFindHighlight? findHighlight;
 
   @override
   Widget build(BuildContext context) {
@@ -52,48 +62,81 @@ class AnchoredMarkdownPreview extends StatelessWidget {
     blockKeys.removeWhere((offset, _) => !live.contains(offset));
 
     final textBuilder = PreviewTextBuilder();
-    return PreviewSelectionSurface(
-      onSelectionChanged: onSelectionChanged,
-      child: Column(
+    final quoteBuilder = PreviewQuoteBuilder();
+    final sheet = previewStyle(context, fontSize: fontSize);
+    Widget column = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         for (var i = 0; i < blocks.length; i++)
           KeyedSubtree(
             key: blockKeys.putIfAbsent(starts[i], GlobalKey.new),
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: MarkdownBody(
-                data: defs.isEmpty ? blocks[i] : '${blocks[i]}\n\n$defs',
-                styleSheet: previewStyle(context),
-                selectable: false,
-                extensionSet:
-                    extensionSet ?? md.ExtensionSet.gitHubFlavored,
-                onTapLink: (text, href, title) async {
-                  if (href == null) return;
-                  final uri = Uri.tryParse(href);
-                  if (uri != null) await launchUrl(uri);
-                },
-                builders: {
-                  'code': _AnchoredCodeBuilder(isDark: isDark),
-                  'p': textBuilder,
-                  'blockquote': textBuilder,
-                  'li': textBuilder,
-                  'h1': textBuilder,
-                  'h2': textBuilder,
-                  'h3': textBuilder,
-                  'h4': textBuilder,
-                  'h5': textBuilder,
-                  'h6': textBuilder,
-                },
-                // ignore: deprecated_member_use
-                imageBuilder: imageBuilder ??
-                    (uri, title, alt) =>
-                        _defaultImage(uri, title, alt, documentPath),
+            child: PreviewFindActive(
+              active: highlightedBlockStart == starts[i],
+              child: PreviewFindOverlay(
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: MarkdownBody(
+                  data: defs.isEmpty ? blocks[i] : '${blocks[i]}\n\n$defs',
+                  styleSheet: sheet,
+                  selectable: false,
+                  extensionSet: extensionSet ?? md.ExtensionSet.gitHubFlavored,
+                  onTapLink: (text, href, title) async {
+                    if (href == null) return;
+                    final uri = Uri.tryParse(href);
+                    if (uri != null) await launchUrl(uri);
+                  },
+                  checkboxBuilder: (checked) => Padding(
+                    padding: const EdgeInsets.only(right: 8, top: 2),
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: Checkbox(
+                        value: checked,
+                        onChanged: (_) {},
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  ),
+                  builders: {
+                    'code': _AnchoredCodeBuilder(isDark: isDark),
+                    'p': textBuilder,
+                    'blockquote': quoteBuilder,
+                    'li': textBuilder,
+                    'h1': PreviewHeadingBuilder(1),
+                    'h2': PreviewHeadingBuilder(2),
+                    'h3': PreviewHeadingBuilder(3),
+                    'h4': PreviewHeadingBuilder(4),
+                    'h5': PreviewHeadingBuilder(5),
+                    'h6': PreviewHeadingBuilder(6),
+                  },
+                  // ignore: deprecated_member_use
+                  imageBuilder:
+                      imageBuilder ??
+                      (uri, title, alt) =>
+                          _defaultImage(uri, title, alt, documentPath),
+                ),
+                ),
               ),
             ),
           ),
       ],
-    ),
+    );
+    if (maxWidth != null) {
+      column = Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxWidth!),
+          child: column,
+        ),
+      );
+    }
+    return PreviewFindScope(
+      highlight: findHighlight,
+      child: PreviewSelectionSurface(
+        onSelectionChanged: onSelectionChanged,
+        child: column,
+      ),
     );
   }
 }
@@ -111,11 +154,70 @@ Widget _defaultImage(
     );
   }
   final base = documentPath != null ? p.dirname(documentPath) : null;
-  final filePath =
-      base == null ? uri.toString() : p.normalize(p.join(base, uri.path));
+  final filePath = base == null
+      ? uri.toString()
+      : p.normalize(p.join(base, uri.path));
   final file = File(filePath);
   if (!file.existsSync()) return Text('[缺少图片: ${uri.path}]');
-  return Image.file(file, fit: BoxFit.contain);
+  return ClipRRect(
+    borderRadius: BorderRadius.circular(8),
+    child: Image.file(file, fit: BoxFit.contain),
+  );
+}
+
+class _CodeCopyButton extends StatefulWidget {
+  const _CodeCopyButton({required this.code, required this.color});
+
+  final String code;
+  final Color color;
+
+  @override
+  State<_CodeCopyButton> createState() => _CodeCopyButtonState();
+}
+
+class _CodeCopyButtonState extends State<_CodeCopyButton> {
+  var _copied = false;
+  Timer? _reset;
+
+  @override
+  void dispose() {
+    _reset?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _copy() async {
+    setState(() => _copied = true);
+    _reset?.cancel();
+    _reset = Timer(const Duration(seconds: 1), () {
+      if (!mounted) return;
+      setState(() => _copied = false);
+    });
+    await Clipboard.setData(ClipboardData(text: widget.code));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: _copied ? '已复制' : '复制',
+      visualDensity: VisualDensity.compact,
+      onPressed: _copy,
+      icon: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 180),
+        transitionBuilder: (child, animation) {
+          return ScaleTransition(
+            scale: animation,
+            child: FadeTransition(opacity: animation, child: child),
+          );
+        },
+        child: Icon(
+          _copied ? Icons.check : Icons.copy,
+          key: ValueKey(_copied),
+          size: 15,
+          color: _copied ? const Color(0xFF2DA44E) : widget.color,
+        ),
+      ),
+    );
+  }
 }
 
 class _AnchoredCodeBuilder extends MarkdownElementBuilder {
@@ -124,36 +226,62 @@ class _AnchoredCodeBuilder extends MarkdownElementBuilder {
 
   @override
   Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
-    if (!element.attributes.containsKey('class')) return null;
-    final language =
-        element.attributes['class']?.replaceFirst('language-', '') ?? '';
+    final rawClass = element.attributes['class'] ?? '';
+    final language = rawClass.replaceFirst('language-', '');
     final code = element.textContent;
+    final fenced = rawClass.isNotEmpty || code.contains('\n');
+    if (!fenced) return null;
+    final muted = isDark ? const Color(0xFF8E8E93) : const Color(0xFF6C6C70);
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.symmetric(vertical: 8),
+      margin: const EdgeInsets.symmetric(vertical: 10),
       decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF282C34) : const Color(0xFFF7F7F7),
+        color: isDark ? const Color(0xFF1E2228) : const Color(0xFFF6F8FA),
         borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isDark ? const Color(0xFF2F333A) : const Color(0xFFD8DEE4),
+        ),
       ),
       child: Stack(
         children: [
           Padding(
-            padding: const EdgeInsets.all(12),
+            padding: EdgeInsets.fromLTRB(
+              16,
+              language.isEmpty ? 14 : 34,
+              16,
+              14,
+            ),
             child: HighlightView(
               code,
               language: _mapLang(language),
               theme: isDark ? atomOneDarkTheme : atomOneLightTheme,
               padding: EdgeInsets.zero,
-              textStyle: const TextStyle(fontFamily: 'Menlo', fontSize: 13),
+              textStyle: const TextStyle(
+                fontFamily: 'Menlo',
+                fontSize: 13,
+                height: 1.55,
+              ),
             ),
           ),
+          if (language.isNotEmpty)
+            Positioned(
+              left: 14,
+              top: 10,
+              child: Text(
+                language,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: muted,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ),
           Positioned(
             right: 4,
-            top: 4,
-            child: IconButton(
-              tooltip: '复制',
-              icon: const Icon(Icons.copy, size: 16),
-              onPressed: () => Clipboard.setData(ClipboardData(text: code)),
+            top: 2,
+            child: SelectionContainer.disabled(
+              child: _CodeCopyButton(code: code, color: muted),
             ),
           ),
         ],
@@ -177,7 +305,23 @@ class _AnchoredCodeBuilder extends MarkdownElementBuilder {
       case 'bash':
         return 'bash';
       case 'yml':
+      case 'yaml':
         return 'yaml';
+      case 'json':
+        return 'json';
+      case 'html':
+        return 'xml';
+      case 'css':
+        return 'css';
+      case 'dart':
+        return 'dart';
+      case 'go':
+        return 'go';
+      case 'rs':
+      case 'rust':
+        return 'rust';
+      case 'java':
+        return 'java';
       default:
         return language.isEmpty ? 'plaintext' : language;
     }

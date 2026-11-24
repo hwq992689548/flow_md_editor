@@ -5,14 +5,8 @@ import "package:file_picker/file_picker.dart";
 import "package:flutter/material.dart";
 import "package:flutter/rendering.dart";
 import "package:flutter/services.dart";
-import "package:flutter_highlight/flutter_highlight.dart";
-import "package:flutter_highlight/themes/atom-one-dark.dart";
-import "package:flutter_highlight/themes/atom-one-light.dart";
-import "package:flutter_markdown/flutter_markdown.dart";
-import "package:markdown/markdown.dart" as md;
 import "package:path/path.dart" as p;
 import "package:shared_preferences/shared_preferences.dart";
-import "package:url_launcher/url_launcher.dart";
 
 import "../models/editor_mode.dart";
 import "../models/markdown_flavor.dart";
@@ -24,12 +18,10 @@ import "../utils/block_splitter.dart";
 import "../utils/document_outline.dart";
 import "../utils/heading_toggle.dart";
 import "../utils/text_finder.dart";
-import "../widgets/preview_style.dart";
-import "../widgets/preview_text.dart";
-import "../widgets/heading_anchor.dart";
 import "../widgets/find_bar.dart";
 import "../widgets/outline_sidebar.dart";
 import "../widgets/anchored_markdown_preview.dart";
+import "../widgets/preview_text.dart";
 import "../widgets/source_editor.dart";
 
 class EditorHome extends StatefulWidget {
@@ -68,7 +60,6 @@ class _EditorHomeState extends State<EditorHome> {
   int _activeBlock = -1;
   String _lastText = "";
   int? _headingOffset;
-  final _readKeys = <int, GlobalKey>{};
   final _blockKeys = <int, GlobalKey>{};
   final _sourceScroll = ScrollController();
   final _previewScroll = ScrollController();
@@ -80,15 +71,12 @@ class _EditorHomeState extends State<EditorHome> {
   bool _autoReloadPreview = true;
   bool _previewHtmlTab = false;
 
-  String? get _path =>
-      _openDocs.isEmpty ? null : _openDocs[_activeIndex].path;
+  String? get _path => _openDocs.isEmpty ? null : _openDocs[_activeIndex].path;
 
-  bool get _dirty =>
-      _openDocs.isEmpty ? false : _openDocs[_activeIndex].dirty;
+  bool get _dirty => _openDocs.isEmpty ? false : _openDocs[_activeIndex].dirty;
 
   double get _fontSize => widget.settings.fontSize.value;
   double get _sourceLineHeight => _fontSize * 1.5;
-
 
   set _dirty(bool value) {
     if (_openDocs.isEmpty) return;
@@ -166,7 +154,6 @@ class _EditorHomeState extends State<EditorHome> {
     _headingOffset = null;
     _lastEnsuredBlockStart = null;
     _blockKeys.clear();
-    _readKeys.clear();
     _matches = const [];
     _matchIndex = 0;
   }
@@ -242,11 +229,35 @@ class _EditorHomeState extends State<EditorHome> {
     setState(() => _previewSource = _controller.text);
   }
 
-  /// Manual Split sync: scroll the right preview to the block for [charOffset].
+  bool get _previewHasBlockKeys =>
+      _mode == EditorMode.live || _mode == EditorMode.read;
+
+  String get _renderedPreviewSource =>
+      _previewSource.isEmpty ? _controller.text : _previewSource;
+
+  int? get _previewFindBlockStart {
+    if (!_findVisible || _findQuery.isEmpty || _matches.isEmpty) {
+      return null;
+    }
+    if (_mode != EditorMode.read && _mode != EditorMode.live) return null;
+    final text = _renderedPreviewSource;
+    if (text.isEmpty) return null;
+    return anchoredBlockStartForOffset(text, _matches[_matchIndex].start);
+  }
+
+  PreviewFindHighlight? get _previewFindHighlight {
+    if (!_findVisible || _findQuery.isEmpty) return null;
+    return PreviewFindHighlight(
+      query: _findQuery,
+      caseSensitive: _findCaseSensitive,
+      mode: _findMatchMode,
+    );
+  }
+
+  /// Scroll the rendered preview to the block that owns [charOffset].
   void _ensurePreviewForSourceOffset(int charOffset, {bool force = false}) {
-    if (_mode != EditorMode.live) return;
-    // Keys belong to the rendered preview source.
-    final text = _previewSource.isEmpty ? _controller.text : _previewSource;
+    if (!_previewHasBlockKeys) return;
+    final text = _renderedPreviewSource;
     if (text.isEmpty) return;
     final start = anchoredBlockStartForOffset(text, charOffset);
     if (start == null) return;
@@ -258,7 +269,7 @@ class _EditorHomeState extends State<EditorHome> {
       }
     }
     void run() {
-      if (!mounted || _mode != EditorMode.live) return;
+      if (!mounted || !_previewHasBlockKeys) return;
       final key = _blockKeys[start];
       final ctx = key?.currentContext;
       if (ctx == null) return;
@@ -322,8 +333,6 @@ class _EditorHomeState extends State<EditorHome> {
       _activeBlock = -1;
       if (mode == EditorMode.live || mode == EditorMode.read) {
         _previewSource = _controller.text;
-      }
-      if (mode == EditorMode.live) {
         _lastEnsuredBlockStart = null;
       }
     });
@@ -534,6 +543,9 @@ class _EditorHomeState extends State<EditorHome> {
         _matchIndex = list.isEmpty ? 0 : list.length - 1;
       }
     });
+    if (!keepIndex && _mode == EditorMode.read && list.isNotEmpty) {
+      _ensurePreviewForSourceOffset(list.first.start, force: true);
+    }
   }
 
   void _gotoMatch(int delta) {
@@ -546,9 +558,9 @@ class _EditorHomeState extends State<EditorHome> {
     final start = hit.start;
     final end = hit.end;
     _controller.selection = TextSelection(baseOffset: start, extentOffset: end);
-    // Split stays Split; Preview jumps to Editor so the match is editable.
     if (_mode == EditorMode.read) {
-      _setMode(EditorMode.source);
+      _ensurePreviewForSourceOffset(start, force: true);
+      return;
     }
     _focusNode.requestFocus();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -574,10 +586,16 @@ class _EditorHomeState extends State<EditorHome> {
     } else {
       if (_matches.isEmpty) return;
       final hit = _matches[_matchIndex];
-      final next = _controller.text.replaceRange(hit.start, hit.end, replacement);
+      final next = _controller.text.replaceRange(
+        hit.start,
+        hit.end,
+        replacement,
+      );
       _controller.value = TextEditingValue(
         text: next,
-        selection: TextSelection.collapsed(offset: hit.start + replacement.length),
+        selection: TextSelection.collapsed(
+          offset: hit.start + replacement.length,
+        ),
       );
     }
     _refreshMatches();
@@ -617,7 +635,6 @@ class _EditorHomeState extends State<EditorHome> {
     );
   }
 
-
   String get _title =>
       _openDocs.isEmpty ? "未命名.md" : _openDocs[_activeIndex].titleLabel;
 
@@ -639,8 +656,11 @@ class _EditorHomeState extends State<EditorHome> {
             const FindNextIntent(),
         const SingleActivator(LogicalKeyboardKey.keyG, meta: true, shift: true):
             const FindPreviousIntent(),
-        const SingleActivator(LogicalKeyboardKey.keyG, control: true, shift: true):
-            const FindPreviousIntent(),
+        const SingleActivator(
+          LogicalKeyboardKey.keyG,
+          control: true,
+          shift: true,
+        ): const FindPreviousIntent(),
         const SingleActivator(LogicalKeyboardKey.keyS, meta: true):
             const SaveIntent(),
         const SingleActivator(LogicalKeyboardKey.keyO, meta: true):
@@ -1005,11 +1025,9 @@ class _EditorHomeState extends State<EditorHome> {
                               children: [
                                 IconButton(
                                   tooltip: '减小字号',
-                                  onPressed:
-                                      fontSize <= AppSettings.minFontSize
+                                  onPressed: fontSize <= AppSettings.minFontSize
                                       ? null
-                                      : () =>
-                                            widget.settings.bumpFontSize(-1),
+                                      : () => widget.settings.bumpFontSize(-1),
                                   icon: Icon(
                                     Icons.remove,
                                     size: 16,
@@ -1036,16 +1054,10 @@ class _EditorHomeState extends State<EditorHome> {
                                 ),
                                 IconButton(
                                   tooltip: '增大字号',
-                                  onPressed:
-                                      fontSize >= AppSettings.maxFontSize
+                                  onPressed: fontSize >= AppSettings.maxFontSize
                                       ? null
-                                      : () =>
-                                            widget.settings.bumpFontSize(1),
-                                  icon: Icon(
-                                    Icons.add,
-                                    size: 16,
-                                    color: segFg,
-                                  ),
+                                      : () => widget.settings.bumpFontSize(1),
+                                  icon: Icon(Icons.add, size: 16, color: segFg),
                                   visualDensity: VisualDensity.compact,
                                   padding: EdgeInsets.zero,
                                   constraints: const BoxConstraints(
@@ -1089,23 +1101,11 @@ class _EditorHomeState extends State<EditorHome> {
                       PopupMenuItem(value: "open", child: Text("打开…")),
                       PopupMenuItem(value: "save", child: Text("保存")),
                       PopupMenuItem(value: "saveAs", child: Text("另存为…")),
-                      PopupMenuItem(
-                        value: "reload",
-                        child: Text("从磁盘重新载入"),
-                      ),
+                      PopupMenuItem(value: "reload", child: Text("从磁盘重新载入")),
                       PopupMenuDivider(),
-                      PopupMenuItem(
-                        value: "export",
-                        child: Text("导出 HTML"),
-                      ),
-                      PopupMenuItem(
-                        value: "wrap",
-                        child: Text("切换自动换行"),
-                      ),
-                      PopupMenuItem(
-                        value: "width",
-                        child: Text("正文宽度…"),
-                      ),
+                      PopupMenuItem(value: "export", child: Text("导出 HTML")),
+                      PopupMenuItem(value: "wrap", child: Text("切换自动换行")),
+                      PopupMenuItem(value: "width", child: Text("正文宽度…")),
                     ],
                   ),
                 ],
@@ -1138,16 +1138,7 @@ class _EditorHomeState extends State<EditorHome> {
         // Split: outline moves left caret/scroll only; use 定位 for right.
       });
     } else if (_mode == EditorMode.read) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final target = _readKeys[heading.offset]?.currentContext;
-        if (target != null) {
-          Scrollable.ensureVisible(
-            target,
-            duration: const Duration(milliseconds: 220),
-            alignment: 0,
-          );
-        }
-      });
+      _ensurePreviewForSourceOffset(heading.offset, force: true);
     }
   }
 
@@ -1203,11 +1194,17 @@ class _EditorHomeState extends State<EditorHome> {
       case EditorMode.read:
         return SingleChildScrollView(
           controller: _previewScroll,
-          padding: const EdgeInsets.fromLTRB(24, 8, 24, 60),
-          child: _markdownView(
-            _controller.text,
-            editableTasks: false,
-            anchorHeadings: true,
+          padding: const EdgeInsets.fromLTRB(32, 28, 32, 80),
+          child: AnchoredMarkdownPreview(
+            source: _renderedPreviewSource,
+            blockKeys: _blockKeys,
+            documentPath: _path,
+            imageBuilder: _previewImage,
+            extensionSet: _flavor.extensionSet,
+            highlightedBlockStart: _previewFindBlockStart,
+            maxWidth: _bodyWidth,
+            fontSize: _fontSize,
+            findHighlight: _previewFindHighlight,
           ),
         );
       case EditorMode.live:
@@ -1225,7 +1222,10 @@ class _EditorHomeState extends State<EditorHome> {
       builder: (context, constraints) {
         final total = constraints.maxWidth;
         final divider = 5.0;
-        final left = (total * _splitRatio).clamp(180.0, total - 180.0 - divider);
+        final left = (total * _splitRatio).clamp(
+          180.0,
+          total - 180.0 - divider,
+        );
         return Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1261,9 +1261,7 @@ class _EditorHomeState extends State<EditorHome> {
                       child: DecoratedBox(
                         decoration: BoxDecoration(
                           color: barBg,
-                          border: Border(
-                            bottom: BorderSide(color: barBorder),
-                          ),
+                          border: Border(bottom: BorderSide(color: barBorder)),
                         ),
                         child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -1276,87 +1274,90 @@ class _EditorHomeState extends State<EditorHome> {
                                   child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                    Checkbox(
-                                      key: const ValueKey(
-                                        'auto-reload-preview',
+                                      Checkbox(
+                                        key: const ValueKey(
+                                          'auto-reload-preview',
+                                        ),
+                                        value: _autoReloadPreview,
+                                        materialTapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                        visualDensity: VisualDensity.compact,
+                                        onChanged: (v) async {
+                                          final next = v ?? true;
+                                          setState(
+                                            () => _autoReloadPreview = next,
+                                          );
+                                          await widget.prefs.setBool(
+                                            _autoReloadKey,
+                                            next,
+                                          );
+                                          if (next) _reloadPreview();
+                                        },
                                       ),
-                                      value: _autoReloadPreview,
-                                      materialTapTargetSize:
-                                          MaterialTapTargetSize.shrinkWrap,
-                                      visualDensity: VisualDensity.compact,
-                                      onChanged: (v) async {
-                                        final next = v ?? true;
-                                        setState(
-                                          () => _autoReloadPreview = next,
-                                        );
-                                        await widget.prefs.setBool(
-                                          _autoReloadKey,
-                                          next,
-                                        );
-                                        if (next) _reloadPreview();
-                                      },
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Text(
-                                      '自动刷新预览',
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        color: muted,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 16),
-                                    SegmentedButton<bool>(
-                                      showSelectedIcon: false,
-                                      style: SegmentedButton.styleFrom(
-                                        visualDensity: const VisualDensity(
-                                          horizontal: -2,
-                                          vertical: -2,
-                                        ),
-                                        textStyle: const TextStyle(
-                                          fontSize: 12,
-                                        ),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 12,
-                                        ),
-                                      ),
-                                      segments: const [
-                                        ButtonSegment(
-                                          value: false,
-                                          label: Text('Preview'),
-                                        ),
-                                        ButtonSegment(
-                                          value: true,
-                                          label: Text('HTML'),
-                                        ),
-                                      ],
-                                      selected: {_previewHtmlTab},
-                                      onSelectionChanged: (s) {
-                                        setState(
-                                          () => _previewHtmlTab = s.first,
-                                        );
-                                      },
-                                    ),
-                                    const SizedBox(width: 16),
-                                    ConstrainedBox(
-                                      constraints: const BoxConstraints(
-                                        maxWidth: 200,
-                                      ),
-                                      child: Text(
-                                        _title,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        '自动刷新预览',
                                         style: TextStyle(
-                                          fontSize: 12,
+                                          fontSize: 13,
                                           color: muted,
                                         ),
                                       ),
-                                    ),
-                                    IconButton(
-                                      tooltip: '刷新预览',
-                                      onPressed: _reloadPreview,
-                                      icon: const Icon(Icons.refresh, size: 18),
-                                      visualDensity: VisualDensity.compact,
-                                    ),
+                                      const SizedBox(width: 16),
+                                      SegmentedButton<bool>(
+                                        showSelectedIcon: false,
+                                        style: SegmentedButton.styleFrom(
+                                          visualDensity: const VisualDensity(
+                                            horizontal: -2,
+                                            vertical: -2,
+                                          ),
+                                          textStyle: const TextStyle(
+                                            fontSize: 12,
+                                          ),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 12,
+                                          ),
+                                        ),
+                                        segments: const [
+                                          ButtonSegment(
+                                            value: false,
+                                            label: Text('Preview'),
+                                          ),
+                                          ButtonSegment(
+                                            value: true,
+                                            label: Text('HTML'),
+                                          ),
+                                        ],
+                                        selected: {_previewHtmlTab},
+                                        onSelectionChanged: (s) {
+                                          setState(
+                                            () => _previewHtmlTab = s.first,
+                                          );
+                                        },
+                                      ),
+                                      const SizedBox(width: 16),
+                                      ConstrainedBox(
+                                        constraints: const BoxConstraints(
+                                          maxWidth: 200,
+                                        ),
+                                        child: Text(
+                                          _title,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: muted,
+                                          ),
+                                        ),
+                                      ),
+                                      IconButton(
+                                        tooltip: '刷新预览',
+                                        onPressed: _reloadPreview,
+                                        icon: const Icon(
+                                          Icons.refresh,
+                                          size: 18,
+                                        ),
+                                        visualDensity: VisualDensity.compact,
+                                      ),
                                     ],
                                   ),
                                 ),
@@ -1396,7 +1397,12 @@ class _EditorHomeState extends State<EditorHome> {
                       child: _previewHtmlTab
                           ? SingleChildScrollView(
                               controller: _previewScroll,
-                              padding: const EdgeInsets.fromLTRB(16, 12, 16, 48),
+                              padding: const EdgeInsets.fromLTRB(
+                                16,
+                                12,
+                                16,
+                                48,
+                              ),
                               child: SelectableText(
                                 markdownToHtmlFragment(
                                   _previewSource,
@@ -1421,6 +1427,10 @@ class _EditorHomeState extends State<EditorHome> {
                                 documentPath: _path,
                                 imageBuilder: _previewImage,
                                 extensionSet: _flavor.extensionSet,
+                                maxWidth: _bodyWidth,
+                                fontSize: _fontSize,
+                                highlightedBlockStart: _previewFindBlockStart,
+                                findHighlight: _previewFindHighlight,
                               ),
                             ),
                     ),
@@ -1449,56 +1459,6 @@ class _EditorHomeState extends State<EditorHome> {
     );
   }
 
-  Widget _markdownView(
-    String source, {
-    required bool editableTasks,
-    int? blockIndex,
-    bool anchorHeadings = false,
-  }) {
-    final headingBuilder = HeadingAnchorBuilder(
-      extractOutline(source),
-      (offset) => _readKeys.putIfAbsent(offset, GlobalKey.new),
-      source,
-      _previewImage,
-    );
-    final textBuilder = PreviewTextBuilder();
-    return PreviewSelectionSurface(
-      child: MarkdownBody(
-      data: source,
-      styleSheet: previewStyle(context),
-      selectable: false,
-      extensionSet: _flavor.extensionSet,
-      onTapLink: (text, href, title) async {
-        if (href == null) return;
-        final uri = Uri.tryParse(href);
-        if (uri != null) await launchUrl(uri);
-      },
-      builders: {
-        if (anchorHeadings)
-          for (var level = 1; level <= 6; level++) "h$level": headingBuilder,
-        if (!anchorHeadings)
-          for (var level = 1; level <= 6; level++) "h$level": textBuilder,
-        "p": textBuilder,
-        "blockquote": textBuilder,
-        "li": textBuilder,
-        "code": _CodeBuilder(
-          isDark: Theme.of(context).brightness == Brightness.dark,
-        ),
-      },
-      checkboxBuilder: (checked) {
-        return Checkbox(
-          value: checked,
-          onChanged: !editableTasks
-              ? null
-              : (_) => _toggleTaskInSource(source, checked, blockIndex),
-        );
-      },
-      // ignore: deprecated_member_use
-      imageBuilder: _previewImage,
-    ),
-    );
-  }
-
   Widget _previewImage(Uri uri, String? title, String? alt) {
     if (uri.scheme == "http" || uri.scheme == "https") {
       return const Padding(
@@ -1512,27 +1472,10 @@ class _EditorHomeState extends State<EditorHome> {
         : p.normalize(p.join(base, uri.path));
     final file = File(filePath);
     if (!file.existsSync()) return Text("[缺少图片: ${uri.path}]");
-    return Image.file(file, fit: BoxFit.contain);
-  }
-
-  void _toggleTaskInSource(
-    String blockSource,
-    bool currentlyChecked,
-    int? blockIndex,
-  ) {
-    final from = currentlyChecked ? "[x]" : "[ ]";
-    final to = currentlyChecked ? "[ ]" : "[x]";
-    final idx = blockSource.toLowerCase().indexOf(from.toLowerCase());
-    if (idx < 0) return;
-    final replaced = blockSource.replaceRange(idx, idx + 3, to);
-    if (blockIndex == null) {
-      _controller.text = _controller.text.replaceFirst(blockSource, replaced);
-      return;
-    }
-    final blocks = splitMarkdownBlocks(_controller.text);
-    if (blockIndex >= blocks.length) return;
-    blocks[blockIndex] = replaced;
-    _controller.text = joinBlocks(blocks);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Image.file(file, fit: BoxFit.contain),
+    );
   }
 }
 
@@ -1542,72 +1485,6 @@ class _BoldIntent extends Intent {
 
 class _ItalicIntent extends Intent {
   const _ItalicIntent();
-}
-
-class _CodeBuilder extends MarkdownElementBuilder {
-  _CodeBuilder({required this.isDark});
-  final bool isDark;
-
-  @override
-  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
-    if (!element.attributes.containsKey("class")) return null;
-    final language =
-        element.attributes["class"]?.replaceFirst("language-", "") ?? "";
-    final code = element.textContent;
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF282C34) : const Color(0xFFF7F7F7),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Stack(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: HighlightView(
-              code,
-              language: _mapLang(language),
-              theme: isDark ? atomOneDarkTheme : atomOneLightTheme,
-              padding: EdgeInsets.zero,
-              textStyle: const TextStyle(fontFamily: "Menlo", fontSize: 13),
-            ),
-          ),
-          Positioned(
-            right: 4,
-            top: 4,
-            child: IconButton(
-              tooltip: "复制",
-              icon: const Icon(Icons.copy, size: 16),
-              onPressed: () => Clipboard.setData(ClipboardData(text: code)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _mapLang(String language) {
-    switch (language) {
-      case "js":
-      case "javascript":
-        return "javascript";
-      case "ts":
-      case "typescript":
-        return "typescript";
-      case "py":
-      case "python":
-        return "python";
-      case "sh":
-      case "shell":
-      case "bash":
-        return "bash";
-      case "yml":
-        return "yaml";
-      default:
-        return language.isEmpty ? "plaintext" : language;
-    }
-  }
 }
 
 const _welcome = """# Flow MD Editor

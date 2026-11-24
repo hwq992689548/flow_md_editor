@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:flutter/gestures.dart';
@@ -7,8 +8,82 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
+import '../utils/text_finder.dart';
 import 'preview_selection.dart';
 export 'preview_selection.dart';
+
+/// Chrome-style find fill: the matched glyphs themselves, not the block.
+const Color kPreviewFindFillLight = Color(0x99FFEB3B);
+const Color kPreviewFindFillDark = Color(0x99E6C229);
+const Color kPreviewFindFillActiveLight = Color(0x99FFC107);
+const Color kPreviewFindFillActiveDark = Color(0x99FFB300);
+
+/// Find-in-preview: paint the matched glyphs, not the whole block.
+class PreviewFindHighlight {
+  const PreviewFindHighlight({
+    required this.query,
+    required this.caseSensitive,
+    required this.mode,
+  });
+
+  final String query;
+  final bool caseSensitive;
+  final FindMatchMode mode;
+
+  @override
+  bool operator ==(Object other) {
+    return other is PreviewFindHighlight &&
+        other.query == query &&
+        other.caseSensitive == caseSensitive &&
+        other.mode == mode;
+  }
+
+  @override
+  int get hashCode => Object.hash(query, caseSensitive, mode);
+}
+
+class PreviewFindScope extends InheritedWidget {
+  const PreviewFindScope({
+    super.key,
+    this.highlight,
+    required super.child,
+  });
+
+  final PreviewFindHighlight? highlight;
+
+  static PreviewFindHighlight? maybeOf(BuildContext context) {
+    return context
+        .dependOnInheritedWidgetOfExactType<PreviewFindScope>()
+        ?.highlight;
+  }
+
+  @override
+  bool updateShouldNotify(PreviewFindScope oldWidget) {
+    return highlight != oldWidget.highlight;
+  }
+}
+
+class PreviewFindActive extends InheritedWidget {
+  const PreviewFindActive({
+    super.key,
+    required this.active,
+    required super.child,
+  });
+
+  final bool active;
+
+  static bool of(BuildContext context) {
+    return context
+            .dependOnInheritedWidgetOfExactType<PreviewFindActive>()
+            ?.active ??
+        false;
+  }
+
+  @override
+  bool updateShouldNotify(PreviewFindActive oldWidget) {
+    return active != oldWidget.active;
+  }
+}
 
 /// Chip fill for unselected inline code. Painted *behind* the selection
 /// highlight so a selected range stays one continuous color.
@@ -55,8 +130,7 @@ InlineCodeSpan previewInlineCodeSpan(
   // cannot leak onto the span (copyWith cannot clear a Paint).
   return InlineCodeSpan(
     text: text,
-    chipColor:
-        isDark ? kInlineCodeBackgroundDark : kInlineCodeBackgroundLight,
+    chipColor: isDark ? kInlineCodeBackgroundDark : kInlineCodeBackgroundLight,
     style: TextStyle(
       inherit: false,
       fontFamily: 'Menlo',
@@ -73,7 +147,9 @@ InlineCodeSpan previewInlineCodeSpan(
 }
 
 /// Collects [start, end) ranges of [InlineCodeSpan]s in a span tree.
-List<(int start, int end, Color color)> collectInlineCodeRanges(InlineSpan root) {
+List<(int start, int end, Color color)> collectInlineCodeRanges(
+  InlineSpan root,
+) {
   final ranges = <(int, int, Color)>[];
   var offset = 0;
 
@@ -100,6 +176,128 @@ List<(int start, int end, Color color)> collectInlineCodeRanges(InlineSpan root)
 
   walk(root);
   return ranges;
+}
+
+/// Wraps each find hit with a yellow [TextStyle.backgroundColor] so the
+/// matched glyphs stay boxed even when layout measurement misses.
+TextSpan applyPreviewFindHighlight(
+  TextSpan span,
+  PreviewFindHighlight? spec, {
+  required Color fill,
+}) {
+  if (spec == null || spec.query.isEmpty) return span;
+  final plain = span.toPlainText(includeSemanticsLabels: false);
+  final hits = findTextHits(
+    plain,
+    spec.query,
+    caseSensitive: spec.caseSensitive,
+    mode: spec.mode,
+  );
+  if (hits.isEmpty) return span;
+  return _highlightInlineSpan(span, hits, fill, 0).$1 as TextSpan;
+}
+
+(InlineSpan, int) _highlightInlineSpan(
+  InlineSpan span,
+  List<TextHit> hits,
+  Color fill,
+  int offset,
+) {
+  if (span is! TextSpan) {
+    final length = span is WidgetSpan
+        ? 1
+        : span.toPlainText(includeSemanticsLabels: false).length;
+    return (span, offset + length);
+  }
+
+  final length = span.toPlainText(includeSemanticsLabels: false).length;
+  if (length == 0) return (span, offset);
+  final overlaps = hits.any(
+    (hit) => hit.start < offset + length && hit.end > offset,
+  );
+  if (!overlaps) return (span, offset + length);
+
+  // A recognizer can only be owned by one span — highlight the whole run.
+  if (span.recognizer != null) {
+    return (
+      TextSpan(
+        text: span.text,
+        children: span.children,
+        style: (span.style ?? const TextStyle()).copyWith(
+          backgroundColor: fill,
+        ),
+        recognizer: span.recognizer,
+        mouseCursor: span.mouseCursor,
+      ),
+      offset + length,
+    );
+  }
+
+  final pieces = <InlineSpan>[];
+  var cursor = offset;
+  final text = span.text;
+  if (text != null && text.isNotEmpty) {
+    pieces.addAll(_splitTextHits(text, hits, fill, cursor, span.style));
+    cursor += text.length;
+  }
+  for (final child in span.children ?? const <InlineSpan>[]) {
+    final mapped = _highlightInlineSpan(child, hits, fill, cursor);
+    pieces.add(mapped.$1);
+    cursor = mapped.$2;
+  }
+  if (pieces.isEmpty) return (span, cursor);
+
+  if (span is InlineCodeSpan) {
+    return (
+      InlineCodeSpan(
+        style: span.style,
+        children: pieces,
+        chipColor: span.chipColor,
+      ),
+      cursor,
+    );
+  }
+  return (
+    TextSpan(
+      style: span.style,
+      mouseCursor: span.mouseCursor,
+      children: pieces,
+    ),
+    cursor,
+  );
+}
+
+List<InlineSpan> _splitTextHits(
+  String text,
+  List<TextHit> hits,
+  Color fill,
+  int offset,
+  TextStyle? style,
+) {
+  final start = offset;
+  final end = offset + text.length;
+  final pieces = <InlineSpan>[];
+  var i = 0;
+  for (final hit in hits) {
+    if (hit.end <= start || hit.start >= end) continue;
+    final hs = math.max(hit.start, start) - start;
+    final he = math.min(hit.end, end) - start;
+    if (hs > i) {
+      pieces.add(TextSpan(text: text.substring(i, hs)));
+    }
+    pieces.add(
+      TextSpan(
+        text: text.substring(hs, he),
+        style: TextStyle(backgroundColor: fill),
+      ),
+    );
+    i = he;
+  }
+  if (i < text.length) {
+    pieces.add(TextSpan(text: text.substring(i)));
+  }
+  if (pieces.isEmpty) return [TextSpan(text: text, style: style)];
+  return pieces;
 }
 
 /// Preview rich text that participates in a parent [SelectionArea].
@@ -145,6 +343,8 @@ class _PreviewSelectableRichTextState extends State<PreviewSelectableRichText> {
   final _selection = SelectionListenerNotifier();
   List<_CodeChip> _chips = const [];
   List<Rect> _highlights = const [];
+  List<Rect> _findHighlights = const [];
+  bool _findActive = false;
 
   @override
   void initState() {
@@ -190,6 +390,12 @@ class _PreviewSelectableRichTextState extends State<PreviewSelectableRichText> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _sync());
+  }
+
+  @override
   void didUpdateWidget(covariant PreviewSelectableRichText oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.span != widget.span || oldWidget.style != widget.style) {
@@ -201,17 +407,26 @@ class _PreviewSelectableRichTextState extends State<PreviewSelectableRichText> {
     if (!mounted) return;
     final chips = _measureChips();
     final highlights = _measureHighlights();
-    if (_sameChips(_chips, chips) && _sameRects(_highlights, highlights)) {
+    final finds = _measureFindHighlights();
+    final active = PreviewFindActive.of(context);
+    if (_sameChips(_chips, chips) &&
+        _sameRects(_highlights, highlights) &&
+        _sameRects(_findHighlights, finds) &&
+        _findActive == active) {
       return;
     }
     setState(() {
       _chips = chips;
       _highlights = highlights;
+      _findHighlights = finds;
+      _findActive = active;
     });
   }
 
   List<Rect> _measureHighlights() {
-    final paragraph = _findParagraph(_textKey.currentContext?.findRenderObject());
+    final paragraph = _findParagraph(
+      _textKey.currentContext?.findRenderObject(),
+    );
     final paintBox = _paintKey.currentContext?.findRenderObject() as RenderBox?;
     if (paragraph == null || paintBox == null || !paintBox.hasSize) {
       return const [];
@@ -238,8 +453,48 @@ class _PreviewSelectableRichTextState extends State<PreviewSelectableRichText> {
     return rects;
   }
 
+  List<Rect> _measureFindHighlights() {
+    final spec = PreviewFindScope.maybeOf(context);
+    if (spec == null || spec.query.isEmpty) return const [];
+    final paragraph = _findParagraph(
+      _textKey.currentContext?.findRenderObject(),
+    );
+    final paintBox = _paintKey.currentContext?.findRenderObject() as RenderBox?;
+    if (paragraph == null || paintBox == null || !paintBox.hasSize) {
+      return const [];
+    }
+    final origin = paintBox.globalToLocal(paragraph.localToGlobal(Offset.zero));
+    final plain = widget.span.toPlainText(includeSemanticsLabels: false);
+    final hits = findTextHits(
+      plain,
+      spec.query,
+      caseSensitive: spec.caseSensitive,
+      mode: spec.mode,
+    );
+    final rects = <Rect>[];
+    for (final hit in hits) {
+      for (final box in paragraph.getBoxesForSelection(
+        TextSelection(baseOffset: hit.start, extentOffset: hit.end),
+        boxHeightStyle: BoxHeightStyle.includeLineSpacingMiddle,
+        boxWidthStyle: BoxWidthStyle.tight,
+      )) {
+        rects.add(
+          Rect.fromLTWH(
+            origin.dx + box.left - 1.5,
+            origin.dy + box.top,
+            (box.right - box.left) + 3,
+            box.bottom - box.top,
+          ),
+        );
+      }
+    }
+    return rects;
+  }
+
   List<_CodeChip> _measureChips() {
-    final paragraph = _findParagraph(_textKey.currentContext?.findRenderObject());
+    final paragraph = _findParagraph(
+      _textKey.currentContext?.findRenderObject(),
+    );
     final paintBox = _paintKey.currentContext?.findRenderObject() as RenderBox?;
     if (paragraph == null || paintBox == null || !paintBox.hasSize) {
       return const [];
@@ -313,36 +568,55 @@ class _PreviewSelectableRichTextState extends State<PreviewSelectableRichText> {
 
   @override
   Widget build(BuildContext context) {
-    // Rebuild when the parent SelectionArea selection changes.
+    // Rebuild when the parent SelectionArea selection or find query changes.
     PreviewSelectionScope.maybeOf(context);
+    PreviewFindScope.maybeOf(context);
+    PreviewFindActive.of(context);
     WidgetsBinding.instance.addPostFrameCallback((_) => _sync());
     final base = _base;
-    final highlight = DefaultSelectionStyle.of(context).selectionColor ??
+    final highlight =
+        DefaultSelectionStyle.of(context).selectionColor ??
         Theme.of(context).textSelectionTheme.selectionColor ??
         const Color(0xFFB3D7FF);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final findFill = _findActive
+        ? (isDark ? kPreviewFindFillActiveDark : kPreviewFindFillActiveLight)
+        : (isDark ? kPreviewFindFillDark : kPreviewFindFillLight);
+    final findBorder = _findActive
+        ? (isDark ? const Color(0xFFFFD54F) : const Color(0xFFEF6C00))
+        : (isDark ? const Color(0xFFC9A227) : const Color(0xFFF9A825));
+    final spec = PreviewFindScope.maybeOf(context);
+    final displaySpan = applyPreviewFindHighlight(
+      widget.span,
+      spec,
+      fill: findFill,
+    );
     // CustomPaint draws behind the text. The Text's own tight selection
     // is made fully transparent so only this continuous highlight shows.
     return SelectionListener(
       selectionNotifier: _selection,
       child: CustomPaint(
-      key: _paintKey,
-      painter: _PreviewBackgroundPainter(
-        chips: _chips,
-        highlights: _highlights,
-        highlightColor: highlight,
-      ),
-      child: Text.rich(
-        widget.span,
-        key: _textKey,
-        style: base,
-        textAlign: widget.textAlign,
-        strutStyle: previewStrut(base),
-        textHeightBehavior: const TextHeightBehavior(
-          leadingDistribution: TextLeadingDistribution.even,
+        key: _paintKey,
+        painter: _PreviewBackgroundPainter(
+          chips: _chips,
+          highlights: _highlights,
+          highlightColor: highlight,
+          findHighlights: _findHighlights,
+          findFill: findFill,
+          findBorder: findBorder,
         ),
-        selectionColor: const Color(0x00000000),
+        child: Text.rich(
+          displaySpan,
+          key: _textKey,
+          style: base,
+          textAlign: widget.textAlign,
+          strutStyle: previewStrut(base),
+          textHeightBehavior: const TextHeightBehavior(
+            leadingDistribution: TextLeadingDistribution.even,
+          ),
+          selectionColor: const Color(0x00000000),
+        ),
       ),
-    ),
     );
   }
 }
@@ -374,11 +648,17 @@ class _PreviewBackgroundPainter extends CustomPainter {
     required this.chips,
     required this.highlights,
     required this.highlightColor,
+    required this.findHighlights,
+    required this.findFill,
+    required this.findBorder,
   });
 
   final List<_CodeChip> chips;
   final List<Rect> highlights;
   final Color highlightColor;
+  final List<Rect> findHighlights;
+  final Color findFill;
+  final Color findBorder;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -390,7 +670,26 @@ class _PreviewBackgroundPainter extends CustomPainter {
         paint,
       );
     }
-    paint.color = highlightColor;
+    paint.color = findFill;
+    for (final rect in findHighlights) {
+      final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(3));
+      canvas.drawRRect(rrect, paint);
+    }
+    if (findHighlights.isNotEmpty) {
+      final stroke = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2
+        ..color = findBorder;
+      for (final rect in findHighlights) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(rect, const Radius.circular(3)),
+          stroke,
+        );
+      }
+    }
+    paint
+      ..style = PaintingStyle.fill
+      ..color = highlightColor;
     for (final rect in highlights) {
       canvas.drawRect(rect, paint);
     }
@@ -399,7 +698,10 @@ class _PreviewBackgroundPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _PreviewBackgroundPainter oldDelegate) {
     return oldDelegate.highlightColor != highlightColor ||
+        oldDelegate.findFill != findFill ||
+        oldDelegate.findBorder != findBorder ||
         !_sameRects(oldDelegate.highlights, highlights) ||
+        !_sameRects(oldDelegate.findHighlights, findHighlights) ||
         !_sameChips(oldDelegate.chips, chips);
   }
 }
@@ -424,11 +726,7 @@ TextSpan markdownInlineSpan(
   );
 }
 
-InlineSpan _inline(
-  md.Node node,
-  TextStyle style, {
-  required bool isDark,
-}) {
+InlineSpan _inline(md.Node node, TextStyle style, {required bool isDark}) {
   if (node is md.Text) return TextSpan(text: node.text, style: style);
   if (node is! md.Element) return const TextSpan();
   if (node.tag == 'br') return const TextSpan(text: '\n');
@@ -498,6 +796,178 @@ class PreviewTextBuilder extends MarkdownElementBuilder {
     return previewSelectableRichText(
       markdownInlineSpan(element, style, isDark: isDark),
       style: style,
+    );
+  }
+}
+
+/// Heading with Markdown Reader / GitHub-style spacing and h1/h2 rules.
+class PreviewHeadingBuilder extends PreviewTextBuilder {
+  PreviewHeadingBuilder(this.level);
+  final int level;
+
+  @override
+  Widget? visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    TextStyle? preferredStyle,
+    TextStyle? parentStyle,
+  ) {
+    final child = super.visitElementAfterWithContext(
+      context,
+      element,
+      preferredStyle,
+      parentStyle,
+    );
+    if (child == null) return null;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final hairline = isDark ? const Color(0xFF3A3A3C) : const Color(0xFFD0D7DE);
+    final pad = level == 1
+        ? const EdgeInsets.only(top: 12, bottom: 12)
+        : level == 2
+        ? const EdgeInsets.only(top: 24, bottom: 10)
+        : const EdgeInsets.only(top: 16, bottom: 8);
+    return Container(
+      width: double.infinity,
+      margin: EdgeInsets.only(bottom: level <= 2 ? 8 : 0),
+      padding: pad.copyWith(bottom: level <= 2 ? 10 : pad.bottom),
+      decoration: level <= 2
+          ? BoxDecoration(
+              border: Border(bottom: BorderSide(color: hairline, width: 1)),
+            )
+          : null,
+      child: child,
+    );
+  }
+}
+
+class _AlertLook {
+  const _AlertLook(this.label, this.icon, this.accent, this.bg);
+  final String label;
+  final IconData icon;
+  final Color accent;
+  final Color bg;
+}
+
+/// GitHub-style quotes, plus `[!NOTE]` / `[!TIP]` / … alerts.
+class PreviewQuoteBuilder extends PreviewTextBuilder {
+  static final _alert = RegExp(
+    r'^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*',
+    caseSensitive: false,
+  );
+
+  static _AlertLook? _look(String kind, {required bool isDark}) {
+    switch (kind.toUpperCase()) {
+      case 'NOTE':
+        return _AlertLook(
+          'Note',
+          Icons.info_outline,
+          isDark ? const Color(0xFF6CB6FF) : const Color(0xFF0969DA),
+          isDark ? const Color(0xFF152334) : const Color(0xFFDDF4FF),
+        );
+      case 'TIP':
+        return _AlertLook(
+          'Tip',
+          Icons.lightbulb_outline,
+          isDark ? const Color(0xFF3FB950) : const Color(0xFF1A7F37),
+          isDark ? const Color(0xFF12261A) : const Color(0xFFDAFBE1),
+        );
+      case 'IMPORTANT':
+        return _AlertLook(
+          'Important',
+          Icons.priority_high,
+          isDark ? const Color(0xFFD2A8FF) : const Color(0xFF8250DF),
+          isDark ? const Color(0xFF241A33) : const Color(0xFFFBEFFF),
+        );
+      case 'WARNING':
+        return _AlertLook(
+          'Warning',
+          Icons.warning_amber_outlined,
+          isDark ? const Color(0xFFD29922) : const Color(0xFF9A6700),
+          isDark ? const Color(0xFF2A2111) : const Color(0xFFFFF8C5),
+        );
+      case 'CAUTION':
+        return _AlertLook(
+          'Caution',
+          Icons.report_outlined,
+          isDark ? const Color(0xFFFF7B72) : const Color(0xFFD1242F),
+          isDark ? const Color(0xFF2D1517) : const Color(0xFFFFEBE9),
+        );
+    }
+    return null;
+  }
+
+  @override
+  Widget? visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    TextStyle? preferredStyle,
+    TextStyle? parentStyle,
+  ) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final raw = element.textContent.trim();
+    final alert = _alert.firstMatch(raw);
+    if (alert != null) {
+      final look = _look(alert.group(1)!, isDark: isDark);
+      if (look != null) {
+        final body = raw.substring(alert.end).trim();
+        final style = (preferredStyle ?? parentStyle ?? const TextStyle())
+            .copyWith(
+              color: isDark ? const Color(0xFFDDDEE3) : const Color(0xFF1C1C1E),
+              backgroundColor: Colors.transparent,
+            );
+        return Container(
+          width: double.infinity,
+          margin: const EdgeInsets.symmetric(vertical: 8),
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          decoration: BoxDecoration(
+            color: look.bg,
+            borderRadius: BorderRadius.circular(8),
+            border: Border(left: BorderSide(color: look.accent, width: 4)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(look.icon, size: 16, color: look.accent),
+                  const SizedBox(width: 6),
+                  Text(
+                    look.label,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: look.accent,
+                    ),
+                  ),
+                ],
+              ),
+              if (body.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                previewSelectableRichText(
+                  TextSpan(text: body, style: style),
+                  style: style,
+                ),
+              ],
+            ],
+          ),
+        );
+      }
+    }
+    final child = super.visitElementAfterWithContext(
+      context,
+      element,
+      preferredStyle,
+      parentStyle,
+    );
+    final hairline = isDark ? const Color(0xFF3A3A3C) : const Color(0xFFD0D7DE);
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: hairline, width: 4)),
+      ),
+      child: child,
     );
   }
 }

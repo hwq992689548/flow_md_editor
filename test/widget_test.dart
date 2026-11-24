@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flow_md_editor/app.dart';
+import 'package:flow_md_editor/widgets/anchored_markdown_preview.dart';
+import 'package:flow_md_editor/widgets/preview_text.dart';
+import 'package:flow_md_editor/widgets/source_editor.dart';
 
 Future<void> launch(
   WidgetTester tester, {
@@ -135,6 +138,47 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('preview renders github-style alerts', (tester) async {
+    await launch(tester);
+    await mode(tester, 'Editor');
+    await tester.enterText(
+      find.byType(TextField).last,
+      '# Alerts\n\n> [!NOTE]\n> Keep this in mind.\n',
+    );
+    await tester.pumpAndSettle();
+    await mode(tester, 'Preview');
+    expect(find.text('Note'), findsOneWidget);
+    expect(find.textContaining('Keep this in mind.'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('code copy icon becomes a check then copy again', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: AnchoredMarkdownPreview(
+              source: '```dart\nvoid main() {}\n```\n',
+              blockKeys: <int, GlobalKey>{},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.copy), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.copy));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byIcon(Icons.check), findsOneWidget);
+    expect(find.byIcon(Icons.copy), findsNothing);
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byIcon(Icons.copy), findsOneWidget);
+    expect(find.byIcon(Icons.check), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('tables render in preview and split', (tester) async {
     await launch(tester);
     await mode(tester, 'Editor');
@@ -152,6 +196,87 @@ void main() {
       expect(table.children[1].decoration, isNot(table.children[2].decoration));
       expect(tester.takeException(), isNull);
     }
+  });
+
+  testWidgets('find in preview stays in preview and scrolls to match', (
+    tester,
+  ) async {
+    await launch(tester);
+    await mode(tester, 'Editor');
+    final source = [
+      for (var i = 0; i < 12; i++)
+        '## Section $i\n\n${'Paragraph content. ' * 20} uniquehit$i',
+    ].join('\n\n');
+    await tester.enterText(find.byType(TextField).last, source);
+    await tester.pumpAndSettle();
+    await mode(tester, 'Preview');
+    await tester.tap(find.byTooltip('查找 (⌘F / Ctrl+F)'));
+    await tester.pumpAndSettle();
+    final findField = find.byWidgetPredicate(
+      (w) => w is TextField && w.decoration?.hintText == 'Text',
+    );
+    await tester.enterText(findField, 'uniquehit11');
+    await tester.pumpAndSettle();
+    expect(find.byType(SourceEditor), findsNothing);
+    final rendered = find.textContaining('uniquehit11');
+    expect(rendered, findsWidgets);
+    final dy = tester.getTopLeft(rendered.last).dy;
+    expect(dy, greaterThan(80));
+    expect(dy, lessThan(850));
+    await tester.tap(find.byTooltip('Next'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SourceEditor), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('preview find paints a glyph highlight on the match', (
+    tester,
+  ) async {
+    await launch(tester);
+    await mode(tester, 'Editor');
+    await tester.enterText(
+      find.byType(TextField).last,
+      '# 仓库结构分层说明\n\n正文里也有分层两个字。',
+    );
+    await tester.pumpAndSettle();
+    await mode(tester, 'Preview');
+    await tester.tap(find.byTooltip('查找 (⌘F / Ctrl+F)'));
+    await tester.pumpAndSettle();
+    final findField = find.byWidgetPredicate(
+      (w) => w is TextField && w.decoration?.hintText == 'Text',
+    );
+    await tester.enterText(findField, '分层');
+    await tester.pumpAndSettle();
+    expect(find.textContaining('分层'), findsWidgets);
+    expect(find.byType(SourceEditor), findsNothing);
+    final texts = tester.widgetList<Text>(
+      find.descendant(
+        of: find.byType(PreviewSelectableRichText),
+        matching: find.byType(Text),
+      ),
+    );
+    var boxed = 0;
+    for (final text in texts) {
+      final span = text.textSpan;
+      if (span == null) continue;
+      void walk(InlineSpan node) {
+        if (node is TextSpan) {
+          if (node.text == '分层' && node.style?.backgroundColor != null) {
+            boxed++;
+          }
+          for (final child in node.children ?? const <InlineSpan>[]) {
+            walk(child);
+          }
+        }
+      }
+      walk(span);
+    }
+    expect(
+      boxed,
+      greaterThan(0),
+      reason: 'Preview find must box the matched 分层 glyphs',
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('find next stays in split and selects match in source', (
@@ -180,10 +305,9 @@ void main() {
     final controller = tester.widget<TextField>(sourceField).controller!;
     expect(controller.selection.isValid, isTrue);
     expect(
-      controller.text.substring(
-        controller.selection.start,
-        controller.selection.end,
-      ).toLowerCase(),
+      controller.text
+          .substring(controller.selection.start, controller.selection.end)
+          .toLowerCase(),
       'findme',
     );
     expect(tester.takeException(), isNull);
@@ -221,10 +345,13 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('typing updates split preview without auto-scroll', (tester) async {
+  testWidgets('typing updates split preview without auto-scroll', (
+    tester,
+  ) async {
     await launch(tester);
     await mode(tester, 'Editor');
-    const source = '# Title\n\nOne block here.\n\nTwo block here.\n\nThree block here.';
+    const source =
+        '# Title\n\nOne block here.\n\nTwo block here.\n\nThree block here.';
     await tester.enterText(find.byType(TextField).last, source);
     await tester.pumpAndSettle();
     await mode(tester, 'Split');
@@ -233,7 +360,8 @@ void main() {
 
     final field = find.byType(TextField).last;
     final controller = tester.widget<TextField>(field).controller!;
-    final at = controller.text.indexOf('Two block here.') + 'Two block here.'.length;
+    final at =
+        controller.text.indexOf('Two block here.') + 'Two block here.'.length;
     controller.selection = TextSelection.collapsed(offset: at);
     await tester.pump();
     final next = controller.text.replaceRange(at, at, ' EXTRA');
@@ -261,12 +389,16 @@ void main() {
     // Two open docs: dirty original stays listed, new blank is active.
     expect(find.text('未命名.md •'), findsWidgets);
     expect(find.text('Documents'), findsOneWidget);
-    final controller = tester.widget<TextField>(find.byType(TextField).last).controller!;
+    final controller = tester
+        .widget<TextField>(find.byType(TextField).last)
+        .controller!;
     expect(controller.text, isEmpty);
     // Switch back to dirty doc via sidebar title.
     await tester.tap(find.text('未命名.md •').first);
     await tester.pumpAndSettle();
-    final restored = tester.widget<TextField>(find.byType(TextField).last).controller!;
+    final restored = tester
+        .widget<TextField>(find.byType(TextField).last)
+        .controller!;
     expect(restored.text, contains('Keep Me'));
     expect(find.text('Keep Me'), findsWidgets);
     expect(tester.takeException(), isNull);
@@ -328,8 +460,6 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-
-
   testWidgets('xcode-style find bar switches to replace and closes on Done', (
     tester,
   ) async {
@@ -378,14 +508,12 @@ void main() {
       if (w is RichText) {
         final style = w.text.style;
         final plain = w.text.toPlainText();
-        return plain.contains('Flow MD Editor') &&
-            (style?.fontSize ?? 0) >= 20;
+        return plain.contains('Flow MD Editor') && (style?.fontSize ?? 0) >= 20;
       }
       if (w is SelectableText) {
         final plain = w.textSpan?.toPlainText() ?? w.data ?? '';
         final style = w.textSpan?.style ?? w.style;
-        return plain.contains('Flow MD Editor') &&
-            (style?.fontSize ?? 0) >= 20;
+        return plain.contains('Flow MD Editor') && (style?.fontSize ?? 0) >= 20;
       }
       return false;
     });
@@ -454,5 +582,4 @@ void main() {
     expect(find.text('定位'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
-
 }

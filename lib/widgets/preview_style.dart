@@ -4,10 +4,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import '../services/app_settings.dart';
 
 /// Markdown stylesheet scaled by [fontSize] and tinted for light/dark.
-MarkdownStyleSheet previewStyle(
-  BuildContext context, {
-  double? fontSize,
-}) {
+MarkdownStyleSheet previewStyle(BuildContext context, {double? fontSize}) {
   final isDark = Theme.of(context).brightness == Brightness.dark;
   final base =
       (fontSize ??
@@ -23,10 +20,10 @@ MarkdownStyleSheet previewStyle(
   final heading = isDark ? const Color(0xFFF4F4F6) : const Color(0xFF1D1D1F);
   final heading2 = isDark ? const Color(0xFFF0F0F4) : const Color(0xFF2C2C2E);
   final grid = isDark ? const Color(0xFF343638) : const Color(0xFFD2D2D7);
-  final quoteBg = isDark ? const Color(0xFF101213) : const Color(0xFFF2F2F7);
-  final quoteBorder = isDark ? const Color(0xFF404345) : const Color(0xFFC7C7CC);
   final codeFg = isDark ? const Color(0xFFD2DCF0) : const Color(0xFF1F2328);
-  final codeBlockBg = isDark ? const Color(0xFF151719) : const Color(0xFFF7F7F9);
+  final codeBlockBg = isDark
+      ? const Color(0xFF151719)
+      : const Color(0xFFF7F7F9);
   final tableBg = isDark ? const Color(0xFF161819) : const Color(0xFFFAFAFC);
   final link = isDark ? const Color(0xFF79A7FF) : const Color(0xFF0A84FF);
 
@@ -64,8 +61,8 @@ MarkdownStyleSheet previewStyle(
   return MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
     p: TextStyle(
       inherit: false,
-      fontSize: s(15),
-      height: 1.7,
+      fontSize: s(16),
+      height: 1.75,
       leadingDistribution: TextLeadingDistribution.even,
       color: text,
       textBaseline: TextBaseline.alphabetic,
@@ -73,10 +70,10 @@ MarkdownStyleSheet previewStyle(
       decoration: TextDecoration.none,
       fontFamilyFallback: fallbacks,
     ),
-    h1: headingStyle(size: s(28), weight: FontWeight.w600, color: heading),
-    h2: headingStyle(size: s(22), weight: FontWeight.w600, color: heading2),
+    h1: headingStyle(size: s(32), weight: FontWeight.w700, color: heading),
+    h2: headingStyle(size: s(24), weight: FontWeight.w600, color: heading2),
     h3: headingStyle(
-      size: s(18),
+      size: s(20),
       weight: FontWeight.w600,
       color: text,
       height: 1.4,
@@ -99,17 +96,16 @@ MarkdownStyleSheet previewStyle(
       color: muted,
       height: 1.4,
     ),
-    h1Padding: const EdgeInsets.only(top: 12, bottom: 16),
-    h2Padding: const EdgeInsets.only(top: 16, bottom: 12),
-    h3Padding: const EdgeInsets.only(top: 12, bottom: 8),
-    blockSpacing: 16,
+    h1Padding: const EdgeInsets.only(top: 8, bottom: 12),
+    h2Padding: const EdgeInsets.only(top: 20, bottom: 10),
+    h3Padding: const EdgeInsets.only(top: 16, bottom: 8),
+    blockSpacing: 18,
+    listIndent: 28,
     a: TextStyle(color: link, decoration: TextDecoration.none),
-    blockquote: TextStyle(fontSize: s(15), height: 1.65, color: muted),
-    blockquotePadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-    blockquoteDecoration: BoxDecoration(
-      color: quoteBg,
-      border: Border(left: BorderSide(color: quoteBorder, width: 3)),
-    ),
+    blockquote: TextStyle(fontSize: s(16), height: 1.7, color: muted),
+    // Quote chrome is painted by [PreviewQuoteBuilder] so alerts can replace it.
+    blockquotePadding: EdgeInsets.zero,
+    blockquoteDecoration: const BoxDecoration(),
     // No TextStyle.backgroundColor: Flutter paints span backgrounds over
     // the selection highlight. Inline chips are drawn behind the text by
     // PreviewSelectableRichText instead.
@@ -126,7 +122,11 @@ MarkdownStyleSheet previewStyle(
       color: codeBlockBg,
       borderRadius: BorderRadius.circular(8),
     ),
-    tableBorder: TableBorder.all(color: grid, width: 0.7),
+    tableBorder: TableBorder(
+      horizontalInside: BorderSide(color: grid, width: 0.7),
+      top: BorderSide(color: grid, width: 0.7),
+      bottom: BorderSide(color: grid, width: 0.7),
+    ),
     tableCellsDecoration: BoxDecoration(color: tableBg),
     tableCellsPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
     tableHead: TextStyle(
